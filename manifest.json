@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "NotebookLM Study Flow",
+  "version": "0.1.0",
+  "description": "Export chats, reuse prompts, and organize sources inside NotebookLM.",
+  "permissions": [
+    "storage",
+    "downloads"
+  ],
+  "host_permissions": [
+    "https://notebooklm.google.com/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/styles.css"
+      ],
+      "matches": [
+        "https://notebooklm.google.com/*"
+      ]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://notebooklm.google.com/*"
+      ],
+      "js": [
+        "src/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "NotebookLM Study Flow",
+    "default_popup": "src/popup.html"
+  },
+  "options_page": "src/options.html"
+}
