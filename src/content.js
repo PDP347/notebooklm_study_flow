@@ -109,6 +109,7 @@ const state = {
   exportFormat: "markdown",
   selectedArtifactKind: "mind-map",
   selectedArtifactItemId: "",
+  selectedArtifactIdsByKind: {},
   selectedArtifactFolderId: "all",
   expandedArtifactFolders: { all: true },
   artifactContextMenu: null,
@@ -120,6 +121,7 @@ const state = {
   artifactInspecting: false,
   artifactNativeMenuInspecting: false,
   artifactFolderDraft: "",
+  artifactDomItemsCache: {},
   floatingLayout: {
     toggle: { x: null, y: TOGGLE_DEFAULT_TOP },
     panel: { x: null, y: PANEL_DEFAULT_TOP }
@@ -334,7 +336,19 @@ function handleClick(event) {
   } else if (action === "set-artifact-kind") {
     state.selectedArtifactKind = actionTarget.dataset.kind;
     state.selectedArtifactItemId = "";
+    pruneSelectedArtifactIdsForKind(state.selectedArtifactKind);
     renderArtifactView();
+  } else if (action === "toggle-artifact-item") {
+    toggleArtifactItemSelection(actionTarget.dataset.itemId || "");
+    renderArtifactView();
+  } else if (action === "select-all-artifact-items") {
+    selectAllArtifactItemsForCurrentKind();
+    renderArtifactView();
+  } else if (action === "clear-artifact-selection") {
+    clearArtifactSelectionForCurrentKind();
+    renderArtifactView();
+  } else if (action === "export-artifact-selected") {
+    void exportSelectedArtifacts(actionTarget.dataset.commandKind);
   } else if (action === "artifact-select-folder") {
     state.selectedArtifactFolderId = actionTarget.dataset.folderId || "all";
     renderArtifactView();
@@ -374,7 +388,7 @@ function handleClick(event) {
   } else if (action === "delete-prompt") {
     deletePrompt(actionTarget.dataset.id);
   } else if (action === "export-artifact") {
-    exportArtifact(actionTarget.dataset.commandKind);
+    void exportSelectedArtifacts(actionTarget.dataset.commandKind);
   } else if (action === "inspect-artifacts") {
     inspectArtifactAvailability(true);
   }
@@ -588,17 +602,70 @@ function renderArtifactView() {
     void inspectArtifactAvailability(false);
   }
 
+  if (["study_guide", "briefing_doc", "blog_post"].includes(state.selectedArtifactKind)) {
+    state.selectedArtifactKind = "report";
+  }
   const kind = state.selectedArtifactKind;
   const feedback = state.artifactCommandFeedback;
   const isError = Boolean(feedback) && feedback.includes("失败");
   const availability = state.artifactAvailability;
   const artifactItems = getArtifactItemsForKind(kind, availability);
+  const selectedArtifactIds = getSelectedArtifactIdsForKind(kind, availability);
+  const selectedCount = selectedArtifactIds.length;
   const selectedArtifactItem = getSelectedArtifactItem(kind, availability);
   const artifactOptions = [
     { kind: 'mind-map', icon: '导图', label: '思维导图', supported: availability?.mindMap?.supported ?? null },
     { kind: 'slide-pdf', icon: 'PDF', label: '演示文稿 PDF', supported: availability?.slideDeck?.pdfSupported ?? null },
     { kind: 'slide-pptx', icon: 'PPTX', label: '演示文稿 PPTX', supported: availability?.slideDeck?.pptxPossible ?? null }
   ];
+  artifactOptions.push(
+    { kind: "audio", icon: "Audio", label: "音频", supported: (availability?.byKind?.audio || []).some((item) => item?.links?.primary) },
+    { kind: "video", icon: "Video", label: "视频", supported: (availability?.byKind?.video || []).some((item) => item?.links?.primary) },
+    { kind: "infographic", icon: "Info", label: "信息图", supported: (availability?.byKind?.infographic || []).some((item) => item?.links?.primary) }
+  );
+  artifactOptions.push(
+    { kind: "quiz", icon: "Quiz", label: "测验", supported: (availability?.byKind?.quiz || []).length > 0 },
+    { kind: "flashcards", icon: "Cards", label: "闪卡", supported: (availability?.byKind?.flashcards || []).length > 0 },
+    { kind: "report", icon: "Report", label: "报告", supported: (availability?.byKind?.report || []).length > 0 },
+    { kind: "data_table", icon: "CSV", label: "数据表", supported: (availability?.byKind?.data_table || []).length > 0 }
+  );
+
+  artifactOptions.push(
+    { kind: "note", icon: "Note", label: "Note", supported: (availability?.note?.items || []).length > 0 }
+  );
+
+  const mergedReportKinds = ["report", "study_guide", "briefing_doc", "blog_post"];
+  const reportSupported = mergedReportKinds.some((k) => (availability?.byKind?.[k] || []).length > 0);
+  const normalizedArtifactOptions = artifactOptions
+    .filter((opt) => !["study_guide", "briefing_doc", "blog_post"].includes(opt.kind))
+    .map((opt) => {
+      if (opt.kind === "report") return { ...opt, supported: reportSupported, label: "报告" };
+      if (opt.kind === "audio") return { ...opt, label: "音频" };
+      if (opt.kind === "video") return { ...opt, label: "视频" };
+      if (opt.kind === "infographic") return { ...opt, label: "信息图" };
+      if (opt.kind === "quiz") return { ...opt, label: "测验" };
+      if (opt.kind === "flashcards") return { ...opt, label: "闪卡" };
+      if (opt.kind === "data_table") return { ...opt, label: "数据表" };
+      return opt;
+    });
+  artifactOptions.length = 0;
+  artifactOptions.push(...normalizedArtifactOptions);
+  const optionLabelMap = {
+    report: "Report",
+    audio: "Audio",
+    video: "Video",
+    infographic: "Infographic",
+    quiz: "Quiz",
+    flashcards: "Flashcards",
+    data_table: "Data Table",
+    note: "Notes"
+  };
+  for (const opt of artifactOptions) {
+    if (optionLabelMap[opt.kind]) {
+      opt.label = optionLabelMap[opt.kind];
+    }
+  }
+
   const statusText = notebookId
     ? state.artifactInspecting
       ? "正在同步当前笔记本的产物状态"
@@ -630,7 +697,7 @@ function renderArtifactView() {
           </button>
         `).join('')}
       </div>
-      ${renderArtifactAvailabilitySummary(availability, notebookId)}
+      
     </section>
     <section class="nlsf-section">
       <div class="nlsf-section-heading">
@@ -638,8 +705,32 @@ function renderArtifactView() {
       </div>
       <div class="nlsf-card">
         <span class="nlsf-label">具体文件</span>
+        <div class="nlsf-section-heading">
+          <span class="nlsf-label">Items</span>
+          <span class="nlsf-badge nlsf-badge--soft">${selectedCount}/${artifactItems.length}</span>
+        </div>
+        <div class="nlsf-pill-row">
+          <button class="nlsf-btn" data-action="select-all-artifact-items" type="button" ${artifactItems.length ? "" : "disabled"}>Select All</button>
+          <button class="nlsf-btn" data-action="clear-artifact-selection" type="button" ${selectedCount ? "" : "disabled"}>Clear</button>
+        </div>
+        <div class="nlsf-message-list">
+          ${artifactItems.length
+            ? artifactItems.map((item) => {
+                const checked = selectedArtifactIds.includes(String(item.id));
+                return `
+                  <button class="nlsf-message-item ${checked ? "is-selected" : ""}" data-action="toggle-artifact-item" data-item-id="${escapeAttribute(item.id)}" type="button" aria-pressed="${checked ? "true" : "false"}">
+                    <span class="nlsf-check ${checked ? "is-checked" : ""}" aria-hidden="true">${checked ? "✓" : ""}</span>
+                    <span class="nlsf-message-body">
+                      <strong>${escapeHtml(item.label)}</strong>
+                      <small>${escapeHtml(item.meta)}</small>
+                    </span>
+                  </button>
+                `;
+              }).join("")
+            : '<p class="nlsf-empty">No exportable items in this type.</p>'}
+        </div>
         <div class="nlsf-form">
-          <select id="nlsf-artifact-item-select" name="artifact-item-select" ${artifactItems.length ? "" : "disabled"}>
+          <select id="nlsf-artifact-item-select" name="artifact-item-select" style="display:none" ${artifactItems.length ? "" : "disabled"}>
             ${artifactItems.length
               ? artifactItems.map((item) => `<option value="${escapeAttribute(item.id)}" ${selectedArtifactItem?.id === item.id ? "selected" : ""}>${escapeHtml(item.label)}</option>`).join("")
               : '<option value="">当前类型下没有可导出的产物</option>'}
@@ -1336,14 +1427,13 @@ function getArtifactVariant(item) {
 
 function getReportSubtype(title) {
   const lowered = String(title || "").toLowerCase();
-  if (lowered.startsWith("briefing doc")) {
-    return "briefing_doc";
-  }
-  if (lowered.startsWith("study guide")) {
-    return "study_guide";
-  }
-  if (lowered.startsWith("blog post")) {
-    return "blog_post";
+  if (
+    lowered.startsWith("briefing doc")
+    || lowered.startsWith("study guide")
+    || lowered.startsWith("blog post")
+    || lowered.startsWith("report")
+  ) {
+    return "report";
   }
   return "report";
 }
@@ -1479,7 +1569,16 @@ function getUnifiedArtifactItems(availability) {
   const notebookId = availability.notebookId || getNotebookId();
   const library = notebookId ? getArtifactLibraryForNotebook(notebookId) : { folders: DEFAULT_ARTIFACT_FOLDERS, assignments: {} };
   const kindHints = collectArtifactLibraryKindHints();
-  const domItems = collectArtifactLibraryDomItems();
+  const liveDomItems = collectArtifactLibraryDomItems();
+  let domItems = liveDomItems;
+  if (notebookId) {
+    if (liveDomItems.length) {
+      state.artifactDomItemsCache[notebookId] = liveDomItems;
+    } else if (Array.isArray(state.artifactDomItemsCache[notebookId])) {
+      // Keep mapped notes/folders visible while Studio detail panels hide the list DOM.
+      domItems = state.artifactDomItemsCache[notebookId];
+    }
+  }
   const items = [];
 
   for (const item of availability.mindMap?.items || []) {
@@ -1583,7 +1682,54 @@ function canExportSelectedArtifact(kind, availability, notebookId) {
   if (!notebookId || !availability) {
     return false;
   }
-  return Boolean(getSelectedArtifactItem(kind, availability));
+  return getSelectedArtifactIdsForKind(kind, availability).length > 0;
+}
+
+function getSelectedArtifactIdsForKind(kind, availability) {
+  const key = kind || state.selectedArtifactKind;
+  const itemIds = new Set(getArtifactItemsForKind(key, availability).map((item) => String(item.id)));
+  const selected = Array.isArray(state.selectedArtifactIdsByKind?.[key]) ? state.selectedArtifactIdsByKind[key] : [];
+  const pruned = selected.filter((id) => itemIds.has(String(id)));
+
+  if (!state.selectedArtifactIdsByKind) {
+    state.selectedArtifactIdsByKind = {};
+  }
+  if (pruned.length !== selected.length) {
+    state.selectedArtifactIdsByKind[key] = pruned;
+  }
+  return pruned;
+}
+
+function pruneSelectedArtifactIdsForKind(kind) {
+  getSelectedArtifactIdsForKind(kind, state.artifactAvailability);
+}
+
+function setSelectedArtifactIdsForKind(kind, ids) {
+  if (!state.selectedArtifactIdsByKind) {
+    state.selectedArtifactIdsByKind = {};
+  }
+  state.selectedArtifactIdsByKind[kind] = Array.from(new Set((ids || []).map((id) => String(id))));
+}
+
+function toggleArtifactItemSelection(itemId) {
+  if (!itemId) {
+    return;
+  }
+  const kind = state.selectedArtifactKind;
+  const current = getSelectedArtifactIdsForKind(kind, state.artifactAvailability);
+  const exists = current.includes(String(itemId));
+  const next = exists ? current.filter((id) => id !== String(itemId)) : [...current, String(itemId)];
+  setSelectedArtifactIdsForKind(kind, next);
+}
+
+function selectAllArtifactItemsForCurrentKind() {
+  const kind = state.selectedArtifactKind;
+  const items = getArtifactItemsForKind(kind, state.artifactAvailability);
+  setSelectedArtifactIdsForKind(kind, items.map((item) => String(item.id)));
+}
+
+function clearArtifactSelectionForCurrentKind() {
+  setSelectedArtifactIdsForKind(state.selectedArtifactKind, []);
 }
 
 function formatArtifactCreatedAt(value) {
@@ -1629,6 +1775,43 @@ function getArtifactItemsForKind(kind, availability) {
       }));
   }
 
+  if (
+    kind === "audio"
+    || kind === "video"
+    || kind === "infographic"
+    || kind === "quiz"
+    || kind === "flashcards"
+    || kind === "report"
+    || kind === "note"
+    || kind === "data_table"
+  ) {
+    const items = kind === "report"
+      ? [
+          ...(availability.byKind?.report || []),
+          ...(availability.byKind?.study_guide || []),
+          ...(availability.byKind?.briefing_doc || []),
+          ...(availability.byKind?.blog_post || [])
+        ]
+      : kind === "note"
+        ? (availability.note?.items || []).map((item) => ({
+            id: item.id,
+            title: item.title,
+            createdAt: item.createdAt,
+            content: item.content,
+            kind: "note",
+            exportFormats: ["markdown", "json"],
+            raw: item.raw || item
+          }))
+      : (availability.byKind?.[kind] || []);
+    return items
+      .map((item) => ({
+        id: item.id,
+        label: `${item.title || kind} · ${formatArtifactCreatedAt(item.createdAt)}`,
+        meta: `Title: ${item.title || kind} | Time: ${formatArtifactCreatedAt(item.createdAt)} | Type: ${kind} | Formats: ${(item.exportFormats || []).join(", ") || "structured"} | ID: ${item.id}`,
+        item
+      }));
+  }
+
   return [];
 }
 
@@ -1636,6 +1819,14 @@ function getSelectedArtifactItem(kind, availability) {
   const items = getArtifactItemsForKind(kind, availability);
   if (!items.length) {
     return null;
+  }
+
+  const selectedIds = getSelectedArtifactIdsForKind(kind, availability);
+  if (selectedIds.length) {
+    const byBatchSelection = items.find((item) => selectedIds.includes(String(item.id)));
+    if (byBatchSelection) {
+      return byBatchSelection;
+    }
   }
 
   const explicit = items.find((item) => item.id === state.selectedArtifactItemId);
@@ -1830,6 +2021,31 @@ async function listMindMapsRaw(notebookId) {
   });
 }
 
+async function listNotesRaw(notebookId) {
+  const result = await callNotebookRpc(
+    RPC_METHODS.GET_NOTES_AND_MIND_MAPS,
+    [notebookId],
+    notebookId,
+    { allowNull: true }
+  );
+
+  const allItems = Array.isArray(result?.[0]) ? result[0] : [];
+  return allItems.filter((item) => {
+    if (!Array.isArray(item) || !item.length) {
+      return false;
+    }
+    const content = typeof item[1] === "string"
+      ? item[1]
+      : Array.isArray(item[1]) && typeof item[1][1] === "string"
+        ? item[1][1]
+        : "";
+    if (!content) {
+      return false;
+    }
+    return !content.includes('"children":') && !content.includes('"nodes":');
+  });
+}
+
 function parseStudioArtifactTimestamp(item) {
   if (Array.isArray(item?.[15]) && item[15].length > 0) {
     const value = Number(item[15][0]);
@@ -1851,16 +2067,117 @@ function parseMindMapTimestamp(item) {
   return 0;
 }
 
-function buildArtifactAvailabilityFromRaw(notebookId, studioArtifacts, mindMaps) {
+function collectHttpUrlsFromValue(value, bucket = []) {
+  if (typeof value === "string") {
+    if (value.startsWith("http")) {
+      bucket.push(value);
+    }
+    return bucket;
+  }
+  if (Array.isArray(value)) {
+    for (const child of value) {
+      collectHttpUrlsFromValue(child, bucket);
+    }
+    return bucket;
+  }
+  if (value && typeof value === "object") {
+    for (const child of Object.values(value)) {
+      collectHttpUrlsFromValue(child, bucket);
+    }
+  }
+  return bucket;
+}
+
+function classifyArtifactDownloadUrls(rawItem) {
+  const allUrls = Array.from(new Set(collectHttpUrlsFromValue(rawItem)));
+  const byExt = {
+    pdf: "",
+    pptx: "",
+    json: "",
+    csv: "",
+    markdown: "",
+    html: "",
+    text: "",
+    media: "",
+    image: "",
+    primary: ""
+  };
+
+  const pick = (matcher) => allUrls.find((url) => matcher(url)) || "";
+  const lower = (url) => url.toLowerCase();
+
+  byExt.pdf = pick((url) => lower(url).includes(".pdf"));
+  byExt.pptx = pick((url) => lower(url).includes(".pptx"));
+  byExt.json = pick((url) => lower(url).includes(".json"));
+  byExt.csv = pick((url) => lower(url).includes(".csv"));
+  byExt.markdown = pick((url) => /\.md(?:own)?(\?|$)/i.test(url));
+  byExt.html = pick((url) => /\.html?(\?|$)/i.test(url));
+  byExt.text = pick((url) => /\.txt(\?|$)/i.test(url));
+  byExt.media = pick((url) => /\.(mp3|m4a|wav|ogg|aac|mp4|webm|mov)(\?|$)/i.test(url));
+  byExt.image = pick((url) => /\.(png|jpg|jpeg|webp|gif|svg)(\?|$)/i.test(url));
+
+  byExt.primary = byExt.media
+    || byExt.image
+    || byExt.csv
+    || byExt.markdown
+    || byExt.html
+    || byExt.text
+    || byExt.json
+    || byExt.pdf
+    || byExt.pptx
+    || allUrls[0]
+    || "";
+
+  return byExt;
+}
+
+function getKindExportFormats(kind, links) {
+  if (kind === "mind_map") {
+    return ["json"];
+  }
+  if (kind === "note") {
+    return ["markdown", "json"];
+  }
+  if (kind === "slide_deck") {
+    return [links.pdf ? "pdf" : "", links.pptx ? "pptx" : ""].filter(Boolean);
+  }
+  if (kind === "data_table") {
+    return [links.csv ? "csv" : links.primary ? "file" : ""].filter(Boolean);
+  }
+  if (kind === "audio") {
+    return [links.media ? "audio" : links.primary ? "file" : ""].filter(Boolean);
+  }
+  if (kind === "video") {
+    return [links.media ? "video" : links.primary ? "file" : ""].filter(Boolean);
+  }
+  if (kind === "infographic") {
+    return [links.image ? "image" : links.primary ? "file" : ""].filter(Boolean);
+  }
+  if (kind === "quiz" || kind === "flashcards") {
+    return [links.json ? "json" : "", links.markdown ? "markdown" : "", links.html ? "html" : "", links.primary ? "file" : ""].filter(Boolean);
+  }
+  if (kind === "report") {
+    return [links.markdown ? "markdown" : "", links.html ? "html" : "", links.json ? "json" : "", links.text ? "txt" : "", links.primary ? "file" : ""].filter(Boolean);
+  }
+  return [links.primary ? "file" : ""].filter(Boolean);
+}
+
+function buildArtifactAvailabilityFromRaw(notebookId, studioArtifacts, mindMaps, notes) {
   const completedStudioItems = studioArtifacts
     .filter((item) => Array.isArray(item) && item[4] === 3)
-    .map((item) => ({
-      id: String(item[0] || ""),
-      title: String(item[1] || ""),
-      createdAt: parseStudioArtifactTimestamp(item),
-      kind: mapStudioArtifactKind(item),
-      raw: item
-    }))
+    .map((item) => {
+      const kind = mapStudioArtifactKind(item);
+      const links = classifyArtifactDownloadUrls(item);
+      return {
+        id: String(item[0] || ""),
+        title: String(item[1] || ""),
+        createdAt: parseStudioArtifactTimestamp(item),
+        kind,
+        raw: item,
+        links,
+        exportFormats: getKindExportFormats(kind, links)
+      };
+    })
     .sort((left, right) => right.createdAt - left.createdAt);
 
   const slideDecks = studioArtifacts.filter((item) => Array.isArray(item) && item[2] === 8);
@@ -1903,6 +2220,30 @@ function buildArtifactAvailabilityFromRaw(notebookId, studioArtifacts, mindMaps)
     .sort((left, right) => right.createdAt - left.createdAt);
 
   const latestMindMap = mindMapCandidates[0] || null;
+  const noteCandidates = (notes || [])
+    .map((item) => {
+      const title = Array.isArray(item[1]) && typeof item[1][4] === "string" ? item[1][4] : "Note";
+      const content = typeof item[1] === "string"
+        ? item[1]
+        : Array.isArray(item[1]) && typeof item[1][1] === "string"
+          ? item[1][1]
+          : "";
+      const id = String(item[0] || "");
+      return {
+        id,
+        title,
+        createdAt: parseMindMapTimestamp(item),
+        content,
+        kind: "note",
+        raw: item,
+        links: {},
+        exportFormats: ["markdown", "json"]
+      };
+    })
+    .filter((item) => item.content)
+    .sort((left, right) => right.createdAt - left.createdAt);
+  const latestNote = noteCandidates[0] || null;
+  const itemsForByKind = [...completedStudioItems, ...noteCandidates];
 
   return {
     ok: true,
@@ -1916,6 +2257,14 @@ function buildArtifactAvailabilityFromRaw(notebookId, studioArtifacts, mindMaps)
       latestContent: latestMindMap?.content || "",
       items: mindMapCandidates
     },
+    note: {
+      count: noteCandidates.length,
+      completedCount: noteCandidates.length,
+      latestTitle: latestNote?.title || "",
+      supported: Boolean(latestNote),
+      latestContent: latestNote?.content || "",
+      items: noteCandidates
+    },
     slideDeck: {
       count: slideDecks.length,
       completedCount: completedSlideDecks.length,
@@ -1927,7 +2276,13 @@ function buildArtifactAvailabilityFromRaw(notebookId, studioArtifacts, mindMaps)
       latestPdfUrl: latestPdf?.pdfUrl || "",
       latestPptxUrl: latestPptx?.pptxUrl || "",
       items: slideCandidates
-    }
+    },
+    byKind: itemsForByKind.reduce((acc, item) => {
+      const key = item.kind || "unknown";
+      if (!acc[key]) acc[key] = [];
+      acc[key].push(item);
+      return acc;
+    }, {})
   };
 }
 
@@ -1955,16 +2310,20 @@ async function inspectArtifactAvailability(forceRefresh) {
   renderArtifactView();
 
   try {
-    const [studioArtifacts, mindMaps] = await Promise.all([
+    const [studioArtifacts, mindMaps, notes] = await Promise.all([
       listStudioArtifactsRaw(notebookId),
-      listMindMapsRaw(notebookId)
+      listMindMapsRaw(notebookId),
+      listNotesRaw(notebookId)
     ]);
-    state.artifactAvailability = buildArtifactAvailabilityFromRaw(notebookId, studioArtifacts, mindMaps);
+    state.artifactAvailability = buildArtifactAvailabilityFromRaw(notebookId, studioArtifacts, mindMaps, notes);
     state.artifactNativeMenuMap = state.artifactNativeMenus?.[notebookId] || {};
+    state.artifactCommandFeedback = `识别完成：思维导图 ${state.artifactAvailability.mindMap.completedCount} 个，笔记 ${state.artifactAvailability.note?.completedCount || 0} 个，PPT ${state.artifactAvailability.slideDeck.completedCount} 个。`;
     state.artifactCommandFeedback = `识别完成：思维导图 ${state.artifactAvailability.mindMap.completedCount} 个，PPT ${state.artifactAvailability.slideDeck.completedCount} 个。`;
+    state.artifactCommandFeedback = `识别完成：思维导图 ${state.artifactAvailability.mindMap.completedCount} 个，笔记 ${state.artifactAvailability.note?.completedCount || 0} 个，PPT ${state.artifactAvailability.slideDeck.completedCount} 个。`;
   } catch (error) {
     state.artifactAvailability = {
       mindMap: { supported: false, completedCount: 0, latestTitle: '', items: [] },
+      note: { supported: false, completedCount: 0, latestTitle: '', items: [] },
       slideDeck: { pdfSupported: false, pptxPossible: false, completedCount: 0, latestTitle: '', items: [] }
     };
     state.artifactNativeMenuMap = state.artifactNativeMenus?.[notebookId] || {};
@@ -1976,7 +2335,7 @@ async function inspectArtifactAvailability(forceRefresh) {
   renderArtifactManagerView();
 }
 
-async function exportArtifact(kind) {
+async function exportArtifactLegacy(kind) {
   const notebookId = getNotebookId();
   if (!notebookId) {
     state.artifactCommandFeedback = '当前页面没有识别到 notebook id。';
@@ -1987,7 +2346,17 @@ async function exportArtifact(kind) {
   const config = {
     'mind-map': { artifactType: 'mind-map', format: 'json' },
     'slide-pdf': { artifactType: 'slide-deck', format: 'pdf' },
-    'slide-pptx': { artifactType: 'slide-deck', format: 'pptx' }
+    'slide-pptx': { artifactType: 'slide-deck', format: 'pptx' },
+    audio: { artifactType: 'audio', format: 'auto' },
+    video: { artifactType: 'video', format: 'auto' },
+    infographic: { artifactType: 'infographic', format: 'auto' },
+    quiz: { artifactType: 'quiz', format: 'structured' },
+    flashcards: { artifactType: 'flashcards', format: 'structured' },
+    report: { artifactType: 'report', format: 'structured' },
+    study_guide: { artifactType: 'study_guide', format: 'structured' },
+    briefing_doc: { artifactType: 'briefing_doc', format: 'structured' },
+    blog_post: { artifactType: 'blog_post', format: 'structured' },
+    data_table: { artifactType: 'data_table', format: 'structured' }
   }[kind];
 
   if (!config) {
@@ -2036,16 +2405,24 @@ async function exportArtifact(kind) {
 
     const url = kind === "slide-pptx"
       ? selectedArtifact.item?.pptxUrl
-      : selectedArtifact.item?.pdfUrl;
+      : kind === "slide-pdf"
+        ? selectedArtifact.item?.pdfUrl
+        : chooseDirectExportUrl(selectedArtifact.item, kind);
 
     if (!url) {
       throw new Error("没有找到可用的下载地址。");
     }
 
+    const extension = kind === "slide-pptx"
+      ? "pptx"
+      : kind === "slide-pdf"
+        ? "pdf"
+        : inferFileExtensionFromUrl(url);
+
     const fileName = buildArtifactFileName(
       getNotebookName(),
-      selectedArtifact.item?.title || "slide-deck",
-      kind === "slide-pptx" ? "pptx" : "pdf"
+      selectedArtifact.item?.title || config.artifactType || "artifact",
+      extension
     );
 
     const response = await chrome.runtime.sendMessage({
@@ -2079,6 +2456,304 @@ function formatMindMapJson(rawContent) {
 function buildArtifactFileName(notebookName, artifactType, extension) {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   return `notebooklm-study-flow/${slugify(notebookName)}-${artifactType}-${stamp}.${extension}`;
+}
+
+function inferFileExtensionFromUrl(url) {
+  const value = String(url || "").toLowerCase();
+  if (!value) {
+    return "bin";
+  }
+
+  const match = value.match(/\.([a-z0-9]{2,6})(?:[?#]|$)/i);
+  if (match?.[1]) {
+    return match[1];
+  }
+
+  if (value.includes("mime=audio") || value.includes("/audio/")) return "mp3";
+  if (value.includes("mime=video") || value.includes("/video/")) return "mp4";
+  if (value.includes("mime=image") || value.includes("/image/")) return "png";
+  if (value.includes("pdf")) return "pdf";
+  if (value.includes("pptx")) return "pptx";
+  if (value.includes("html")) return "html";
+  if (value.includes("markdown") || value.includes(".md")) return "md";
+  if (value.includes("text") || value.includes(".txt")) return "txt";
+  if (value.includes("json")) return "json";
+  if (value.includes("csv")) return "csv";
+  return "bin";
+}
+
+function chooseDirectExportUrl(item, kind) {
+  const links = item?.links || {};
+  if (kind === "data_table") {
+    return links.csv || links.primary || "";
+  }
+  if (kind === "quiz" || kind === "flashcards") {
+    return links.json || links.markdown || links.html || links.primary || "";
+  }
+  if (kind === "report") {
+    return links.markdown || links.html || links.text || links.json || links.primary || "";
+  }
+  if (kind === "audio" || kind === "video" || kind === "infographic") {
+    return links.primary || "";
+  }
+  return links.primary || "";
+}
+
+function collectArtifactTextCandidates(value, bucket = []) {
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (text && !text.startsWith("http")) {
+      bucket.push(text);
+    }
+    return bucket;
+  }
+  if (Array.isArray(value)) {
+    for (const child of value) {
+      collectArtifactTextCandidates(child, bucket);
+    }
+    return bucket;
+  }
+  if (value && typeof value === "object") {
+    for (const child of Object.values(value)) {
+      collectArtifactTextCandidates(child, bucket);
+    }
+  }
+  return bucket;
+}
+
+function buildStructuredArtifactFallback(item, kind) {
+  const raw = item?.raw;
+  const title = item?.title || kind || "artifact";
+  if (!raw) {
+    return null;
+  }
+
+  if (kind === "quiz" || kind === "flashcards" || kind === "data_table") {
+    return {
+      extension: "json",
+      mime: "application/json;charset=utf-8",
+      content: JSON.stringify(raw, null, 2)
+    };
+  }
+
+  if (kind === "note") {
+    const noteText = String(item?.content || "").trim();
+    if (noteText) {
+      return {
+        extension: "md",
+        mime: "text/markdown;charset=utf-8",
+        content: `# ${title}\n\n${noteText}`
+      };
+    }
+    return {
+      extension: "json",
+      mime: "application/json;charset=utf-8",
+      content: JSON.stringify(raw, null, 2)
+    };
+  }
+
+  if (kind === "report") {
+    const candidates = Array.from(new Set(collectArtifactTextCandidates(raw)));
+    const longText = candidates
+      .filter((text) => text.length > 20)
+      .sort((a, b) => b.length - a.length)
+      .slice(0, 20);
+
+    if (longText.length) {
+      return {
+        extension: "md",
+        mime: "text/markdown;charset=utf-8",
+        content: `# ${title}\n\n${longText.join("\n\n")}`
+      };
+    }
+  }
+
+  return {
+    extension: "json",
+    mime: "application/json;charset=utf-8",
+    content: JSON.stringify(raw, null, 2)
+  };
+}
+
+async function exportSelectedArtifacts(kind) {
+  const notebookId = getNotebookId();
+  if (!notebookId) {
+    state.artifactCommandFeedback = "No notebook id on current page.";
+    renderArtifactView();
+    return;
+  }
+
+  if (!state.artifactAvailability || state.artifactAvailabilityNotebookId !== notebookId) {
+    await inspectArtifactAvailability(true);
+  }
+  const availability = state.artifactAvailability;
+  const selectedIds = getSelectedArtifactIdsForKind(kind, availability);
+  if (!selectedIds.length) {
+    state.artifactCommandFeedback = "Please select at least one artifact.";
+    renderArtifactView();
+    return;
+  }
+
+  const originalSelection = [...selectedIds];
+  let successCount = 0;
+  let failCount = 0;
+
+  for (let index = 0; index < originalSelection.length; index += 1) {
+    const id = originalSelection[index];
+    setSelectedArtifactIdsForKind(kind, [id]);
+    state.selectedArtifactItemId = id;
+    state.artifactCommandFeedback = `Exporting ${index + 1}/${originalSelection.length}...`;
+    renderArtifactView();
+
+    await exportArtifact(kind);
+    const feedback = String(state.artifactCommandFeedback || "").toLowerCase();
+    const failed = feedback.includes("失败") || feedback.includes("failed") || feedback.includes("error");
+    if (failed) {
+      failCount += 1;
+    } else {
+      successCount += 1;
+    }
+  }
+
+  setSelectedArtifactIdsForKind(kind, originalSelection);
+  state.artifactCommandFeedback = failCount
+    ? `Batch done. Success ${successCount}, failed ${failCount}.`
+    : `Batch done. Success ${successCount}/${originalSelection.length}.`;
+  renderArtifactView();
+}
+
+async function exportArtifact(kind) {
+  const notebookId = getNotebookId();
+  if (!notebookId) {
+    state.artifactCommandFeedback = "当前页面没有识别到 notebook id。";
+    renderArtifactView();
+    return;
+  }
+
+  const config = {
+    "mind-map": { artifactType: "mind-map", format: "json" },
+    "slide-pdf": { artifactType: "slide-deck", format: "pdf" },
+    "slide-pptx": { artifactType: "slide-deck", format: "pptx" },
+    audio: { artifactType: "audio", format: "auto" },
+    video: { artifactType: "video", format: "auto" },
+    infographic: { artifactType: "infographic", format: "auto" },
+    quiz: { artifactType: "quiz", format: "structured" },
+    flashcards: { artifactType: "flashcards", format: "structured" },
+    report: { artifactType: "report", format: "structured" },
+    note: { artifactType: "note", format: "structured" },
+    data_table: { artifactType: "data_table", format: "structured" }
+  }[kind];
+
+  if (!config) {
+    return;
+  }
+
+  if (!state.artifactAvailability || state.artifactAvailabilityNotebookId !== notebookId) {
+    await inspectArtifactAvailability(true);
+  }
+
+  const availability = state.artifactAvailability;
+  const selectedArtifact = getSelectedArtifactItem(kind, availability);
+  if (!selectedArtifact || !canExportSelectedArtifact(kind, availability, notebookId)) {
+    state.artifactCommandFeedback = "当前 notebook 还没有可导出的对应产物。";
+    renderArtifactView();
+    return;
+  }
+
+  state.artifactCommandFeedback = "正在通过扩展执行导出...";
+  renderArtifactView();
+
+  try {
+    if (kind === "mind-map") {
+      const raw = selectedArtifact.item?.content || "";
+      const jsonText = formatMindMapJson(raw);
+      const fileName = buildArtifactFileName(getNotebookName(), selectedArtifact.item?.title || "mind-map", "json");
+      const blob = new Blob([`\uFEFF${jsonText}`], { type: "application/json;charset=utf-8" });
+      const url = await blobToDataUrl(blob);
+
+      const response = await chrome.runtime.sendMessage({
+        type: "nlsf:download",
+        payload: {
+          url,
+          filename: fileName
+        }
+      });
+
+      if (!response?.ok) {
+        throw new Error(response?.error || "思维导图下载失败");
+      }
+
+      state.artifactCommandFeedback = `导出完成：${fileName}`;
+      renderArtifactView();
+      return;
+    }
+
+    const directUrl = kind === "slide-pptx"
+      ? selectedArtifact.item?.pptxUrl
+      : kind === "slide-pdf"
+        ? selectedArtifact.item?.pdfUrl
+        : chooseDirectExportUrl(selectedArtifact.item, kind);
+
+    if (directUrl) {
+      const extension = kind === "slide-pptx"
+        ? "pptx"
+        : kind === "slide-pdf"
+          ? "pdf"
+          : inferFileExtensionFromUrl(directUrl);
+
+      const fileName = buildArtifactFileName(
+        getNotebookName(),
+        selectedArtifact.item?.title || config.artifactType || "artifact",
+        extension
+      );
+
+      const response = await chrome.runtime.sendMessage({
+        type: "nlsf:download-direct",
+        payload: {
+          url: directUrl,
+          filename: fileName
+        }
+      });
+
+      if (!response?.ok) {
+        throw new Error(response?.error || "下载失败");
+      }
+
+      state.artifactCommandFeedback = `导出完成：${fileName}`;
+      renderArtifactView();
+      return;
+    }
+
+    const structured = buildStructuredArtifactFallback(selectedArtifact.item, kind);
+    if (!structured) {
+      throw new Error("没有可用下载地址，且无法构建结构化导出。");
+    }
+
+    const fileName = buildArtifactFileName(
+      getNotebookName(),
+      selectedArtifact.item?.title || config.artifactType || "artifact",
+      structured.extension
+    );
+    const blob = new Blob([`\uFEFF${structured.content}`], { type: structured.mime });
+    const dataUrl = await blobToDataUrl(blob);
+    const response = await chrome.runtime.sendMessage({
+      type: "nlsf:download",
+      payload: {
+        url: dataUrl,
+        filename: fileName
+      }
+    });
+
+    if (!response?.ok) {
+      throw new Error(response?.error || "结构化导出失败");
+    }
+
+    state.artifactCommandFeedback = `导出完成：${fileName}`;
+  } catch (error) {
+    state.artifactCommandFeedback = `导出失败：${String(error)}`;
+  }
+
+  renderArtifactView();
 }
 
 function savePromptFromForm() {
