@@ -121,6 +121,10 @@ const state = {
   artifactInspecting: false,
   artifactNativeMenuInspecting: false,
   artifactFolderDraft: "",
+  renamingFolderId: null,
+  renamingFolderDraft: "",
+  subfolderTargetId: null,
+  subfolderDraft: "",
   artifactDomItemsCache: {},
   floatingLayout: {
     toggle: { x: null, y: TOGGLE_DEFAULT_TOP },
@@ -358,6 +362,31 @@ function handleClick(event) {
     void createArtifactFolder();
   } else if (action === "delete-artifact-folder") {
     void deleteArtifactFolder(actionTarget.dataset.folderId || "");
+  } else if (action === "start-create-subfolder") {
+    state.subfolderTargetId = actionTarget.dataset.folderId || "";
+    state.subfolderDraft = "";
+    state.expandedArtifactFolders[actionTarget.dataset.folderId] = true;
+    renderArtifactManagerView();
+  } else if (action === "cancel-create-subfolder") {
+    state.subfolderTargetId = null;
+    state.subfolderDraft = "";
+    renderArtifactManagerView();
+  } else if (action === "confirm-create-subfolder") {
+    void createArtifactSubfolder();
+  } else if (action === "start-rename-folder") {
+    const folderId = actionTarget.dataset.folderId || "";
+    const notebookId = getNotebookId();
+    const library = notebookId ? getArtifactLibraryForNotebook(notebookId) : null;
+    const folder = library?.folders.find((f) => f.id === folderId);
+    state.renamingFolderId = folderId;
+    state.renamingFolderDraft = folder?.name || "";
+    renderArtifactManagerView();
+  } else if (action === "cancel-rename-folder") {
+    state.renamingFolderId = null;
+    state.renamingFolderDraft = "";
+    renderArtifactManagerView();
+  } else if (action === "confirm-rename-folder") {
+    void renameArtifactFolder(actionTarget.dataset.folderId || "");
   } else if (action === "open-artifact-in-studio") {
     closeArtifactContextMenu();
     void openArtifactInStudio(actionTarget.dataset.artifactKey);
@@ -455,6 +484,10 @@ function handleInput(event) {
     renderPromptView();
   } else if (event.target.name === "artifact-folder-draft") {
     state.artifactFolderDraft = event.target.value;
+  } else if (event.target.name === "folder-rename-draft") {
+    state.renamingFolderDraft = event.target.value;
+  } else if (event.target.name === "subfolder-draft") {
+    state.subfolderDraft = event.target.value;
   }
 }
 
@@ -763,6 +796,8 @@ function renderArtifactManagerView() {
   const availability = state.artifactAvailability;
   const unifiedItems = getUnifiedArtifactItems(availability);
   const folders = getVisibleFolders(notebookId, unifiedItems);
+  const library = notebookId ? getArtifactLibraryForNotebook(notebookId) : null;
+  const customFolderCount = library?.folders?.length || 0;
   const feedback = state.artifactCommandFeedback;
   const isError = Boolean(feedback) && (feedback.includes("失败") || feedback.includes("没有"));
   const statusText = notebookId
@@ -783,14 +818,14 @@ function renderArtifactManagerView() {
         <div class="nlsf-card nlsf-artifact-manager__card">
           <div class="nlsf-section-heading">
             <h3>文件夹</h3>
-            <span class="nlsf-badge nlsf-badge--soft">${folders.length ? folders.length - 1 : 0}</span>
+            <span class="nlsf-badge nlsf-badge--soft">${customFolderCount}</span>
           </div>
           <div class="nlsf-form nlsf-form--inline">
             <input name="artifact-folder-draft" type="text" value="${escapeAttribute(state.artifactFolderDraft)}" placeholder="新建文件夹，例如：课程展示" />
             <button class="nlsf-btn" data-action="create-artifact-folder" type="button" ${notebookId ? "" : "disabled"}>新建</button>
           </div>
           <div class="nlsf-file-tree">
-            ${folders.map((folder) => renderArtifactFolderSection(folder, getFilteredArtifactItems(unifiedItems, folder.id), notebookId)).join("")}
+            ${folders.map((folder) => renderArtifactFolderSection(folder, unifiedItems, library, notebookId)).join("")}
           </div>
           ${feedback ? `<div class="nlsf-feedback ${isError ? 'nlsf-feedback--error' : ''}">${escapeHtml(feedback)}</div>` : ''}
         </div>
@@ -812,8 +847,17 @@ function renderArtifactContextMenu(notebookId) {
     return "";
   }
 
-  const folders = getVisibleFolders(notebookId, getUnifiedArtifactItems(state.artifactAvailability))
-    .filter((folder) => folder.id !== "all" && folder.id !== artifact.folderId);
+  const library = notebookId ? getArtifactLibraryForNotebook(notebookId) : null;
+  const allFolders = library ? library.folders : DEFAULT_ARTIFACT_FOLDERS;
+  // Build ordered list: root folders followed by their children
+  const orderedFolders = [];
+  for (const f of allFolders.filter((f) => !f.parentId)) {
+    orderedFolders.push({ ...f, isChild: false });
+    for (const child of allFolders.filter((c) => c.parentId === f.id)) {
+      orderedFolders.push({ ...child, isChild: true });
+    }
+  }
+  const folders = orderedFolders.filter((folder) => folder.id !== artifact.folderId);
   const nativeItems = getArtifactContextNativeActions(artifact);
 
   return `
@@ -828,8 +872,8 @@ function renderArtifactContextMenu(notebookId) {
       <div class="nlsf-context-menu__label">移入文件夹</div>
       ${folders.length
         ? folders.map((folder) => `
-          <button class="nlsf-context-menu__item nlsf-context-menu__item--folder-target" data-action="move-artifact-to-folder" data-artifact-key="${escapeAttribute(artifact.key)}" data-folder-id="${escapeAttribute(folder.id)}" type="button">
-            <span class="nlsf-context-menu__icon"></span>
+          <button class="nlsf-context-menu__item nlsf-context-menu__item--folder-target${folder.isChild ? " nlsf-context-menu__item--folder-child" : ""}" data-action="move-artifact-to-folder" data-artifact-key="${escapeAttribute(artifact.key)}" data-folder-id="${escapeAttribute(folder.id)}" type="button">
+            <span class="nlsf-context-menu__icon">${folder.isChild ? "└" : ""}</span>
             <span>${escapeHtml(folder.name)}</span>
           </button>
         `).join("")
@@ -1006,12 +1050,36 @@ function renderArtifactFolderTreeItem(folder, selectedFolderId) {
   `;
 }
 
-function renderArtifactFolderSection(folder, items, notebookId) {
+function renderArtifactFolderSection(folder, allItems, library, notebookId, depth = 0) {
   const expanded = isArtifactFolderExpanded(folder.id);
   const deletable = isCustomArtifactFolder(folder.id);
+  const isAll = folder.id === "all";
+  const isRenaming = state.renamingFolderId === folder.id;
+  const isAddingSubfolder = state.subfolderTargetId === folder.id;
+  const directItems = getFilteredArtifactItems(allItems, folder.id);
+  const childFolders = (!isAll && library) ? library.folders.filter((f) => f.parentId === folder.id) : [];
+  const canAddSub = deletable && depth < 4;
+
+  const nameContent = isRenaming
+    ? `<input class="nlsf-folder-rename-input" name="folder-rename-draft" value="${escapeAttribute(state.renamingFolderDraft)}" data-folder-id="${escapeAttribute(folder.id)}" type="text" />`
+    : `<span class="nlsf-file-tree__name">${escapeHtml(folder.name)}</span>`;
+
+  const actionsContent = deletable && !isRenaming ? `
+    <div class="nlsf-folder-actions">
+      ${canAddSub ? `<button class="nlsf-folder-action-btn" data-action="start-create-subfolder" data-folder-id="${escapeAttribute(folder.id)}" type="button" title="新建子文件夹">+</button>` : ""}
+      <button class="nlsf-folder-action-btn" data-action="start-rename-folder" data-folder-id="${escapeAttribute(folder.id)}" type="button" title="重命名">改</button>
+      <button class="nlsf-folder-action-btn nlsf-folder-action-btn--danger" data-action="delete-artifact-folder" data-folder-id="${escapeAttribute(folder.id)}" type="button" title="删除文件夹">×</button>
+    </div>
+  ` : isRenaming ? `
+    <div class="nlsf-folder-actions">
+      <button class="nlsf-folder-action-btn" data-action="confirm-rename-folder" data-folder-id="${escapeAttribute(folder.id)}" type="button">确定</button>
+      <button class="nlsf-folder-action-btn" data-action="cancel-rename-folder" type="button">取消</button>
+    </div>
+  ` : "";
+
   return `
-    <section class="nlsf-folder-section">
-      <div class="nlsf-folder-section__header">
+    <section class="nlsf-folder-section${depth > 0 ? " nlsf-folder-section--child" : ""}">
+      <div class="nlsf-folder-section__header" ${deletable ? `draggable="true" data-folder-drag-id="${escapeAttribute(folder.id)}"` : ""}>
         <button
           class="nlsf-file-tree__item ${expanded ? "is-active" : ""}"
           data-action="toggle-artifact-folder-expand"
@@ -1020,28 +1088,32 @@ function renderArtifactFolderSection(folder, items, notebookId) {
           type="button"
         >
           <span class="nlsf-file-tree__chevron">${expanded ? "▼" : "▶"}</span>
-          <span class="nlsf-file-tree__icon">${folder.id === "all" ? "全部" : "文件夹"}</span>
-          <span class="nlsf-file-tree__name">${escapeHtml(folder.name)}</span>
+          <span class="nlsf-file-tree__icon">${isAll ? "全" : "夹"}</span>
+          ${nameContent}
           <span class="nlsf-file-tree__count">${folder.count}</span>
         </button>
-        ${deletable ? `
-          <button
-            class="nlsf-folder-delete"
-            data-action="delete-artifact-folder"
-            data-folder-id="${escapeAttribute(folder.id)}"
-            type="button"
-            aria-label="删除文件夹 ${escapeAttribute(folder.name)}"
-            title="删除文件夹"
-          >×</button>
-        ` : ""}
+        ${actionsContent}
       </div>
-      ${expanded ? renderArtifactFolderChildren(folder, items, notebookId) : ""}
+      ${expanded ? renderArtifactFolderChildren(folder, directItems, childFolders, allItems, library, notebookId, isAddingSubfolder, depth) : ""}
     </section>
   `;
 }
 
-function renderArtifactFolderChildren(folder, items, notebookId) {
-  if (!items.length) {
+function renderArtifactFolderChildren(folder, directItems, childFolders, allItems, library, notebookId, isAddingSubfolder, depth) {
+  const childSections = childFolders.map((child) => {
+    const childWithCount = { ...child, count: allItems.filter((i) => i.folderId === child.id).length };
+    return renderArtifactFolderSection(childWithCount, allItems, library, notebookId, depth + 1);
+  }).join("");
+
+  const subfolderForm = isAddingSubfolder ? `
+    <div class="nlsf-subfolder-create">
+      <input name="subfolder-draft" type="text" value="${escapeAttribute(state.subfolderDraft)}" placeholder="子文件夹名称" />
+      <button class="nlsf-folder-action-btn" data-action="confirm-create-subfolder" type="button">确定</button>
+      <button class="nlsf-folder-action-btn" data-action="cancel-create-subfolder" type="button">取消</button>
+    </div>
+  ` : "";
+
+  if (!directItems.length && !childFolders.length && !isAddingSubfolder) {
     return `
       <div class="nlsf-folder-children">
         <div class="nlsf-file-empty nlsf-file-empty--nested">
@@ -1053,7 +1125,9 @@ function renderArtifactFolderChildren(folder, items, notebookId) {
 
   return `
     <div class="nlsf-folder-children">
-      ${items.map((item) => renderArtifactManagerItem(item, notebookId)).join("")}
+      ${subfolderForm}
+      ${childSections}
+      ${directItems.map((item) => renderArtifactManagerItem(item)).join("")}
     </div>
   `;
 }
@@ -1079,24 +1153,14 @@ function renderArtifactLibraryItem(item, notebookId) {
   `;
 }
 
-function renderArtifactManagerItem(item, notebookId) {
+function renderArtifactManagerItem(item) {
   const meta = getArtifactKindMeta(item.kind);
-  const folders = getVisibleFolders(notebookId, getUnifiedArtifactItems(state.artifactAvailability)).filter((folder) => folder.id !== "all");
-  const currentFolder = folders.find((folder) => folder.id === item.folderId);
   const menuOpen = state.artifactContextAnchorKey === item.key;
   return `
     <article class="nlsf-artifact-row ${menuOpen ? "is-menu-open" : ""}" draggable="true" data-artifact-key="${escapeAttribute(item.key)}" data-artifact-row="true">
-      <div class="nlsf-artifact-row__main">
-        <div class="nlsf-artifact-row__titleline">
-          <span class="nlsf-artifact-row__type">${escapeHtml(meta.shortLabel)}</span>
-          <strong>${escapeHtml(item.title)}</strong>
-        </div>
-        <p class="nlsf-artifact-row__meta">${escapeHtml(meta.label)}${currentFolder ? ` · 位于「${currentFolder.name}」` : ""}</p>
-      </div>
-      <div class="nlsf-artifact-row__side">
-        <time>${escapeHtml(formatArtifactCreatedAt(item.createdAt))}</time>
-        <button class="nlsf-artifact-row__more" data-action="open-artifact-context-menu" data-artifact-key="${escapeAttribute(item.key)}" type="button" aria-label="更多">⋯</button>
-      </div>
+      <span class="nlsf-artifact-row__type">${escapeHtml(meta.shortLabel)}</span>
+      <strong class="nlsf-artifact-row__title">${escapeHtml(item.title)}</strong>
+      <button class="nlsf-artifact-row__more" data-action="open-artifact-context-menu" data-artifact-key="${escapeAttribute(item.key)}" type="button" aria-label="更多">⋯</button>
     </article>
   `;
 }
@@ -1641,7 +1705,8 @@ function getUnifiedArtifactItems(availability) {
 
 function getVisibleFolders(notebookId, items) {
   const library = notebookId ? getArtifactLibraryForNotebook(notebookId) : { folders: DEFAULT_ARTIFACT_FOLDERS, assignments: {} };
-  const folders = library.folders.map((folder) => ({
+  const rootFolders = library.folders.filter((f) => !f.parentId);
+  const folders = rootFolders.map((folder) => ({
     ...folder,
     count: items.filter((item) => item.folderId === folder.id).length
   }));
@@ -2916,7 +2981,8 @@ async function createArtifactFolder() {
   const folderId = `folder-${crypto.randomUUID()}`;
   library.folders.push({
     id: folderId,
-    name
+    name,
+    parentId: null
   });
   state.expandedArtifactFolders[folderId] = true;
   state.artifactFolderDraft = "";
@@ -2925,8 +2991,104 @@ async function createArtifactFolder() {
   renderArtifactManagerView();
 }
 
+function getFolderDepth(library, folderId) {
+  let depth = 0;
+  let current = library.folders.find((f) => f.id === folderId);
+  while (current?.parentId) {
+    depth++;
+    current = library.folders.find((f) => f.id === current.parentId);
+  }
+  return depth;
+}
+
 function isCustomArtifactFolder(folderId) {
   return Boolean(folderId) && folderId !== "all" && folderId !== "folder-default-unfiled";
+}
+
+async function createArtifactSubfolder() {
+  const notebookId = getNotebookId();
+  const parentId = state.subfolderTargetId;
+  const name = state.subfolderDraft.trim();
+  if (!notebookId || !parentId || !name) {
+    return;
+  }
+
+  const library = ensureArtifactLibraryForNotebook(notebookId);
+  if (getFolderDepth(library, parentId) >= 4) {
+    return;
+  }
+  const folderId = `folder-${crypto.randomUUID()}`;
+  library.folders.push({ id: folderId, name, parentId });
+  state.expandedArtifactFolders[folderId] = true;
+  state.expandedArtifactFolders[parentId] = true;
+  state.subfolderTargetId = null;
+  state.subfolderDraft = "";
+  await persistArtifactLibrary();
+  renderArtifactView();
+  renderArtifactManagerView();
+}
+
+async function renameArtifactFolder(folderId) {
+  const notebookId = getNotebookId();
+  const name = state.renamingFolderDraft.trim();
+  if (!notebookId || !folderId || !name) {
+    state.renamingFolderId = null;
+    state.renamingFolderDraft = "";
+    renderArtifactManagerView();
+    return;
+  }
+
+  const library = ensureArtifactLibraryForNotebook(notebookId);
+  const folder = library.folders.find((f) => f.id === folderId);
+  if (folder) {
+    folder.name = name;
+  }
+  state.renamingFolderId = null;
+  state.renamingFolderDraft = "";
+  await persistArtifactLibrary();
+  renderArtifactView();
+  renderArtifactManagerView();
+}
+
+async function moveFolderToParent(folderId, newParentId) {
+  const notebookId = getNotebookId();
+  if (!notebookId || !folderId || !isCustomArtifactFolder(folderId)) {
+    return;
+  }
+
+  const library = ensureArtifactLibraryForNotebook(notebookId);
+  const folder = library.folders.find((f) => f.id === folderId);
+  if (!folder) {
+    return;
+  }
+
+  // "all" drop target means move to root
+  if (newParentId === "all") {
+    folder.parentId = null;
+  } else if (isCustomArtifactFolder(newParentId)) {
+    const target = library.folders.find((f) => f.id === newParentId);
+    if (!target) {
+      return;
+    }
+    // Allow max depth 4 (5 levels total): target depth + 1 must not exceed 4
+    if (getFolderDepth(library, newParentId) >= 4) {
+      return;
+    }
+    // Can't drop a folder onto itself or onto one of its own descendants
+    const getDescendants = (id) => {
+      const children = library.folders.filter((f) => f.parentId === id).map((f) => f.id);
+      return children.flatMap((cid) => [cid, ...getDescendants(cid)]);
+    };
+    if (newParentId === folderId || getDescendants(folderId).includes(newParentId)) {
+      return;
+    }
+    folder.parentId = newParentId;
+    state.expandedArtifactFolders[newParentId] = true;
+  }
+
+  await persistArtifactLibrary();
+  renderArtifactView();
+  renderArtifactManagerView();
 }
 
 async function deleteArtifactFolder(folderId) {
@@ -2936,10 +3098,21 @@ async function deleteArtifactFolder(folderId) {
   }
 
   const library = ensureArtifactLibraryForNotebook(notebookId);
+
+  // Collect child folder IDs before deletion
+  const childFolderIds = library.folders.filter((f) => f.parentId === folderId).map((f) => f.id);
+
   library.folders = library.folders.filter((folder) => folder.id !== folderId);
 
+  // Promote children to root level
+  for (const folder of library.folders) {
+    if (folder.parentId === folderId) {
+      folder.parentId = null;
+    }
+  }
+
   for (const key of Object.keys(library.assignments)) {
-    if (library.assignments[key] === folderId) {
+    if (library.assignments[key] === folderId || childFolderIds.includes(library.assignments[key])) {
       library.assignments[key] = "folder-default-unfiled";
     }
   }
@@ -2991,6 +3164,14 @@ async function moveArtifactToFolder(artifactKey, folderId) {
 }
 
 function handleDragStart(event) {
+  // Check if dragging a folder header
+  const folderHeader = event.target.closest?.("[data-folder-drag-id]");
+  if (folderHeader && event.dataTransfer) {
+    event.dataTransfer.setData("application/nlsf-folder-id", folderHeader.dataset.folderDragId || "");
+    event.dataTransfer.effectAllowed = "move";
+    return;
+  }
+
   const artifact = event.target.closest?.("[data-artifact-key]");
   if (!artifact || !event.dataTransfer) {
     return;
@@ -3016,12 +3197,20 @@ function handleDrop(event) {
   }
 
   event.preventDefault();
-  const artifactKey = event.dataTransfer.getData("text/plain");
   const folderId = dropTarget.dataset.folderDrop;
-  if (!artifactKey || !folderId) {
+
+  const draggedFolderId = event.dataTransfer.getData("application/nlsf-folder-id");
+  if (draggedFolderId) {
+    if (draggedFolderId !== folderId) {
+      void moveFolderToParent(draggedFolderId, folderId);
+    }
     return;
   }
 
+  const artifactKey = event.dataTransfer.getData("text/plain");
+  if (!artifactKey || !folderId) {
+    return;
+  }
   void moveArtifactToFolder(artifactKey, folderId);
 }
 
